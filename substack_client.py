@@ -206,6 +206,11 @@ class SubstackDocument:
             "type": "captionedImage",
             "content": [image_node]
         })
+        if caption:
+            self.content.append({
+                "type": "paragraph",
+                "content": [{"type": "text", "text": caption, "marks": [{"type": "em"}]}]
+            })
         return self
 
     def blockquote(self, text: str) -> 'SubstackDocument':
@@ -250,7 +255,8 @@ class SubstackDocument:
             })
 
         self.content.append({
-            "type": "ordered_list",
+            "type": "orderedList",
+            "attrs": {"order": 1},
             "content": list_items
         })
         return self
@@ -362,7 +368,7 @@ class MarkdownToSubstack:
                 continue
 
             # Fenced code blocks
-            code_match = re.match(r'^```(\w*)$', stripped)
+            code_match = re.match(r'^```([^\s`]*)\s*$', stripped)
             if code_match:
                 language = code_match.group(1) or ""
                 code_lines = []
@@ -444,11 +450,11 @@ class MarkdownToSubstack:
 
     @staticmethod
     def _parse_inline(text: str) -> List[Dict]:
-        """Parse inline formatting (bold, italic, links)"""
+        """Parse inline formatting (code, bold, italic, links)"""
         content = []
 
         # Pattern for links, bold, italic
-        pattern = r'(\*\*(.+?)\*\*|\*(.+?)\*|_(.+?)_|\[([^\]]+)\]\(([^)]+)\))'
+        pattern = r'(`([^`]+)`|\*\*(.+?)\*\*|\*(.+?)\*|_(.+?)_|\[([^\]]+)\]\(([^)]+)\))'
 
         last_end = 0
         for match in re.finditer(pattern, text):
@@ -458,17 +464,24 @@ class MarkdownToSubstack:
 
             full_match = match.group(0)
 
-            if full_match.startswith('**'):
-                # Bold
+            if full_match.startswith('`'):
+                # Inline code
                 content.append({
                     "type": "text",
                     "text": match.group(2),
+                    "marks": [{"type": "code"}]
+                })
+            elif full_match.startswith('**'):
+                # Bold
+                content.append({
+                    "type": "text",
+                    "text": match.group(3),
                     "marks": [{"type": "strong"}]
                 })
             elif full_match.startswith('['):
                 # Link
-                link_text = match.group(5)
-                link_url = match.group(6)
+                link_text = match.group(6)
+                link_url = match.group(7)
                 content.append({
                     "type": "text",
                     "text": link_text,
@@ -476,7 +489,7 @@ class MarkdownToSubstack:
                 })
             elif full_match.startswith('*') or full_match.startswith('_'):
                 # Italic
-                italic_text = match.group(3) or match.group(4)
+                italic_text = match.group(4) or match.group(5)
                 content.append({
                     "type": "text",
                     "text": italic_text,
@@ -531,10 +544,11 @@ class SubstackClient:
         print(f"Published: {post.canonical_url}")
     """
 
-    def __init__(self, token: str, publication: str, rate_limit: float = 0.5):
+    def __init__(self, token: str, publication: str, rate_limit: float = 0.5, timeout: float = 30.0):
         self.token = token
         self.publication = publication.replace("https://", "").replace("http://", "")
         self.rate_limit = rate_limit
+        self.timeout = timeout
         self._last_request = 0
 
         # Base URLs
@@ -562,29 +576,81 @@ class SubstackClient:
     def _get(self, base: str, path: str) -> Dict:
         """GET request"""
         self._rate_limit_wait()
-        r = requests.get(f"{base}{path}", headers=self.headers)
+        r = requests.get(f"{base}{path}", headers=self.headers, timeout=self.timeout)
         r.raise_for_status()
         return r.json()
 
     def _post(self, base: str, path: str, data: Dict) -> Dict:
         """POST request"""
         self._rate_limit_wait()
-        r = requests.post(f"{base}{path}", headers=self.headers, json=data)
+        r = requests.post(f"{base}{path}", headers=self.headers, json=data, timeout=self.timeout)
         r.raise_for_status()
         return r.json()
 
     def _put(self, base: str, path: str, data: Dict) -> Dict:
         """PUT request"""
         self._rate_limit_wait()
-        r = requests.put(f"{base}{path}", headers=self.headers, json=data)
+        r = requests.put(f"{base}{path}", headers=self.headers, json=data, timeout=self.timeout)
         r.raise_for_status()
         return r.json()
 
     def _delete(self, base: str, path: str) -> bool:
         """DELETE request"""
         self._rate_limit_wait()
-        r = requests.delete(f"{base}{path}", headers=self.headers)
+        r = requests.delete(f"{base}{path}", headers=self.headers, timeout=self.timeout)
         return r.status_code in [200, 204]
+
+    @staticmethod
+    def _ensure_doc_structure(body_json: Dict) -> Dict:
+        """Ensure a minimal ProseMirror doc shape"""
+        if not isinstance(body_json, dict):
+            return {"type": "doc", "content": []}
+        if body_json.get("type") != "doc":
+            body_json["type"] = "doc"
+        content = body_json.get("content")
+        if not isinstance(content, list):
+            body_json["content"] = []
+        return body_json
+
+    @staticmethod
+    def _parse_draft_body(raw_body: Any) -> Dict:
+        """Parse draft_body into a document dict or raise on invalid JSON"""
+        if raw_body is None or raw_body == "":
+            return {"type": "doc", "content": []}
+        if isinstance(raw_body, dict):
+            return SubstackClient._ensure_doc_structure(raw_body)
+        if isinstance(raw_body, str):
+            try:
+                parsed = json.loads(raw_body)
+            except Exception as exc:
+                raise ValueError(f"Could not parse draft_body JSON: {exc}") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("draft_body JSON is not an object")
+            return SubstackClient._ensure_doc_structure(parsed)
+        raise ValueError(f"Unsupported draft_body type: {type(raw_body).__name__}")
+
+    def _fix_internal_redirects(self, node: Any, draft_id: int) -> None:
+        """Ensure image nodes include internalRedirect"""
+        import urllib.parse
+
+        if isinstance(node, list):
+            for child in node:
+                self._fix_internal_redirects(child, draft_id)
+            return
+        if not isinstance(node, dict):
+            return
+
+        if node.get("type") == "image2":
+            attrs = node.setdefault("attrs", {})
+            src = attrs.get("src", "")
+            if src and not attrs.get("internalRedirect"):
+                encoded_url = urllib.parse.quote(src, safe='')
+                attrs["internalRedirect"] = f"https://{self.publication}/i/{draft_id}?img={encoded_url}"
+
+        content = node.get("content")
+        if isinstance(content, list):
+            for child in content:
+                self._fix_internal_redirects(child, draft_id)
 
     def upload_image(self, image_path: str) -> Dict:
         """
@@ -617,7 +683,8 @@ class SubstackClient:
         r = requests.post(
             f"{self.pub_base}/image",
             headers=self.headers,
-            json={"image": data_uri}
+            json={"image": data_uri},
+            timeout=self.timeout
         )
         r.raise_for_status()
         result = r.json()
@@ -672,6 +739,33 @@ class SubstackClient:
             photo_url=r.get("photo_url", ""),
             bio=r.get("bio", "")
         )
+
+    def get_user_profile(self, handle: str) -> Dict:
+        """
+        Get any user's public profile by their Substack handle.
+
+        Returns rich data including:
+        - name, bio, photo_url
+        - rough_num_subscribers, followerCount
+        - bestseller_tier, leaderboardRanking
+        - publicationUsers (their publications)
+        - userLinks (social links)
+        - twitterAccount
+        """
+        return self._get(self.sub_base, f"/user/{handle}/public_profile")
+
+    def search_linkedin(self, linkedin_handle: str) -> List[Dict]:
+        """
+        Search for Substack profiles by LinkedIn handle.
+
+        Note: Only returns profiles that have:
+        1. Linked their LinkedIn account to Substack
+        2. Met certain platform authenticity thresholds
+
+        Most profiles return empty results.
+        """
+        r = self._get(self.sub_base, f"/profile/search/linkedin/{linkedin_handle}")
+        return r.get("results", [])
 
     # --- Publication Info ---
 
@@ -767,8 +861,6 @@ class SubstackClient:
             audience: "everyone", "only_paid", or "founding"
             cover_image: Cover image URL
         """
-        import urllib.parse
-
         # Convert body to JSON
         if isinstance(body, SubstackDocument):
             body_json = body.build()
@@ -776,6 +868,7 @@ class SubstackClient:
             body_json = MarkdownToSubstack.convert(body)
         else:
             body_json = body
+        body_json = self._ensure_doc_structure(body_json)
 
         user_id = self.get_user_id()
 
@@ -797,19 +890,7 @@ class SubstackClient:
         draft_id = r["id"]
 
         # Fix up internalRedirect URLs for any images
-        def fix_internal_redirects(content):
-            for node in content:
-                if node.get("type") == "captionedImage":
-                    for child in node.get("content", []):
-                        if child.get("type") == "image2":
-                            attrs = child.get("attrs", {})
-                            src = attrs.get("src", "")
-                            if src and not attrs.get("internalRedirect"):
-                                encoded_url = urllib.parse.quote(src, safe='')
-                                attrs["internalRedirect"] = f"https://{self.publication}/i/{draft_id}?img={encoded_url}"
-            return content
-
-        body_json["content"] = fix_internal_redirects(body_json.get("content", []))
+        self._fix_internal_redirects(body_json.get("content", []), draft_id)
 
         # Update draft with corrected body
         self._put(self.pub_base, f"/drafts/{draft_id}", {"draft_body": json.dumps(body_json)})
@@ -843,6 +924,8 @@ class SubstackClient:
                 body_json = MarkdownToSubstack.convert(body)
             else:
                 body_json = body
+            body_json = self._ensure_doc_structure(body_json)
+            self._fix_internal_redirects(body_json.get("content", []), draft_id)
             data["draft_body"] = json.dumps(body_json)
 
         return self._put(self.pub_base, f"/drafts/{draft_id}", data)
@@ -1098,12 +1181,12 @@ class LiveBlogSession:
             raise RuntimeError("No active session")
 
         draft_data = self.client.get_draft(self.draft_id)
-        current_body = draft_data.get("draft_body", "{}")
+        current_body = draft_data.get("body_json") or draft_data.get("draft_body", "{}")
 
         try:
-            body_json = json.loads(current_body)
-        except:
-            body_json = {"type": "doc", "content": []}
+            body_json = SubstackClient._parse_draft_body(current_body)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
 
         # Add timestamp
         body_json["content"].append({

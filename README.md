@@ -21,6 +21,12 @@ cd substack-mcp
 pip install -r requirements.txt
 ```
 
+## Testing
+
+```bash
+python -m unittest discover -s tests
+```
+
 ## Setup
 
 ### 1. Get your Substack credentials
@@ -119,7 +125,8 @@ The core client for interacting with Substack's API.
 ```python
 from substack_client import SubstackClient, SubstackDocument
 
-client = SubstackClient(token="your-sid", publication="your-pub.substack.com")
+# rate_limit is seconds between requests; timeout is per-request timeout.
+client = SubstackClient(token="your-sid", publication="your-pub.substack.com", rate_limit=0.5, timeout=30.0)
 
 # Upload an image
 img = client.upload_image("/path/to/image.png")
@@ -164,6 +171,12 @@ Substack uses ProseMirror and requires specific attributes for images:
 ```
 
 The `internalRedirect` field is **required** - without it, Substack's editor fails to render the document.
+
+### Image Handling Notes
+
+- `create_draft` and `update_draft` automatically add missing `internalRedirect` values for any image nodes.
+- Image captions are emitted as separate italic paragraphs (not `imageCaption` nodes) to avoid editor rendering issues.
+- For best rendering results, upload images through `upload_image()` and use the returned metadata.
 
 ## Credits
 

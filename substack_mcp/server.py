@@ -49,6 +49,32 @@ def init_client():
             client = None
 
 
+def _parse_draft_body(draft_data: dict) -> tuple[Optional[dict], Optional[str]]:
+    # Substack returns current content in "body_json" (parsed) and may also
+    # keep the raw submission in "draft_body".  Prefer body_json because the
+    # API clears / stops updating draft_body after it processes the content.
+    raw_body = draft_data.get("body_json") or draft_data.get("draft_body")
+    if raw_body is None or raw_body == "":
+        return {"type": "doc", "content": []}, None
+    if isinstance(raw_body, dict):
+        body_json = raw_body
+    elif isinstance(raw_body, str):
+        try:
+            body_json = json.loads(raw_body)
+        except Exception as exc:
+            return None, f"Could not parse draft body JSON: {exc}"
+    else:
+        return None, f"Unsupported draft_body type: {type(raw_body).__name__}"
+
+    if not isinstance(body_json, dict):
+        return None, "Draft body JSON is not an object"
+    if body_json.get("type") != "doc":
+        body_json["type"] = "doc"
+    if not isinstance(body_json.get("content"), list):
+        body_json["content"] = []
+    return body_json, None
+
+
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
     """List available tools"""
@@ -241,12 +267,9 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             add_timestamp = arguments.get("add_timestamp", True)
 
             draft_data = client.get_draft(draft_id)
-            current_body = draft_data.get("draft_body", "{}")
-
-            try:
-                body_json = json.loads(current_body)
-            except:
-                body_json = {"type": "doc", "content": []}
+            body_json, error = _parse_draft_body(draft_data)
+            if error:
+                return [types.TextContent(type="text", text=json.dumps({"error": error}))]
 
             new_content = []
             if section_title:
@@ -263,6 +286,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             new_content.extend(converted.get("content", []))
             body_json["content"].extend(new_content)
             client.update_draft(draft_id=draft_id, body=body_json)
+            if live_session and live_session.get("draft_id") == draft_id:
+                live_session["updates"] = live_session.get("updates", 0) + 1
 
             result = {
                 "success": True,
@@ -279,12 +304,9 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             caption = arguments.get("caption", "")
 
             draft_data = client.get_draft(draft_id)
-            current_body = draft_data.get("draft_body", "{}")
-
-            try:
-                body_json = json.loads(current_body)
-            except:
-                body_json = {"type": "doc", "content": []}
+            body_json, error = _parse_draft_body(draft_data)
+            if error:
+                return [types.TextContent(type="text", text=json.dumps({"error": error}))]
 
             if filename:
                 body_json["content"].append({
@@ -305,6 +327,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                 })
 
             client.update_draft(draft_id=draft_id, body=body_json)
+            if live_session and live_session.get("draft_id") == draft_id:
+                live_session["updates"] = live_session.get("updates", 0) + 1
             result = {"success": True, "message": "Code block added"}
 
         elif name == "substack_add_image":
@@ -314,30 +338,17 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             alt = arguments.get("alt", "")
 
             draft_data = client.get_draft(draft_id)
-            current_body = draft_data.get("draft_body", "{}")
+            body_json, error = _parse_draft_body(draft_data)
+            if error:
+                return [types.TextContent(type="text", text=json.dumps({"error": error}))]
 
-            try:
-                body_json = json.loads(current_body)
-            except:
-                body_json = {"type": "doc", "content": []}
-
-            image_content = [{
-                "type": "image2",
-                "attrs": {"src": url, "alt": alt, "title": None, "fullscreen": None, "height": None, "width": None}
-            }]
-
-            if caption:
-                image_content.append({
-                    "type": "imageCaption",
-                    "content": [{"type": "text", "text": caption}]
-                })
-
-            body_json["content"].append({
-                "type": "captionedImage",
-                "content": image_content
-            })
+            image_doc = SubstackDocument()
+            image_doc.image(url, alt=alt, caption=caption)
+            body_json["content"].extend(image_doc.build()["content"])
 
             client.update_draft(draft_id=draft_id, body=body_json)
+            if live_session and live_session.get("draft_id") == draft_id:
+                live_session["updates"] = live_session.get("updates", 0) + 1
             result = {"success": True, "message": "Image added"}
 
         elif name == "substack_publish":
@@ -369,7 +380,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             subtitle = arguments.get("subtitle", "")
 
             doc = SubstackDocument()
-            doc.paragraph(f"🔴 **Live Blog Started** - {datetime.now().strftime('%I:%M %p')}")
+            doc.paragraph("🔴 ", doc.bold("Live Blog Started"), f" - {datetime.now().strftime('%I:%M %p')}")
             doc.horizontal_rule()
 
             draft = client.create_draft(title=title, subtitle=subtitle, body=doc)
@@ -397,16 +408,13 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 
                 # Append closing
                 draft_data = client.get_draft(draft_id)
-                current_body = draft_data.get("draft_body", "{}")
-                try:
-                    body_json = json.loads(current_body)
-                except:
-                    body_json = {"type": "doc", "content": []}
+                body_json, error = _parse_draft_body(draft_data)
+                if error:
+                    return [types.TextContent(type="text", text=json.dumps({"error": error}))]
 
-                body_json["content"].append({
-                    "type": "paragraph",
-                    "content": [{"type": "text", "text": f"🔴 **Live Blog Ended** - {datetime.now().strftime('%I:%M %p')}"}]
-                })
+                closing_doc = SubstackDocument()
+                closing_doc.paragraph("🔴 ", closing_doc.bold("Live Blog Ended"), f" - {datetime.now().strftime('%I:%M %p')}")
+                body_json["content"].extend(closing_doc.build()["content"])
                 client.update_draft(draft_id=draft_id, body=body_json)
 
                 result = {"success": True, "session": live_session, "published": False}
@@ -464,13 +472,18 @@ async def read_resource(uri: str) -> str:
     return json.dumps({"error": f"Unknown resource: {uri}"})
 
 
-async def main():
-    """Main entry point"""
+async def _main():
+    """Async entry point"""
     init_client()
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
-if __name__ == "__main__":
+def main():
+    """Console script entry point"""
     import asyncio
-    asyncio.run(main())
+    asyncio.run(_main())
+
+
+if __name__ == "__main__":
+    main()
