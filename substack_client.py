@@ -363,7 +363,13 @@ class MarkdownToSubstack:
             if header_match:
                 level = len(header_match.group(1))
                 text = header_match.group(2)
-                doc.heading(text, level=level)
+                # Parse inline formatting inside headings (e.g. **bold**, *em*, `code`)
+                inline = MarkdownToSubstack._parse_inline(text)
+                doc.content.append({
+                    "type": "heading",
+                    "attrs": {"level": max(2, min(4, level))},
+                    "content": inline if inline else [{"type": "text", "text": text}]
+                })
                 i += 1
                 continue
 
@@ -398,7 +404,16 @@ class MarkdownToSubstack:
                 while i < len(lines) and lines[i].strip().startswith('> '):
                     quote_lines.append(lines[i].strip()[2:])
                     i += 1
-                doc.blockquote(' '.join(quote_lines))
+                quote_text = ' '.join(quote_lines)
+                # Parse inline formatting inside blockquotes
+                inline = MarkdownToSubstack._parse_inline(quote_text)
+                doc.content.append({
+                    "type": "blockquote",
+                    "content": [{
+                        "type": "paragraph",
+                        "content": inline if inline else [{"type": "text", "text": quote_text}]
+                    }]
+                })
                 continue
 
             # Bullet lists
@@ -415,7 +430,21 @@ class MarkdownToSubstack:
                     else:
                         break
                 if items:
-                    doc.bullet_list(items)
+                    list_items = []
+                    for item in items:
+                        # Parse inline formatting inside each list item
+                        inline = MarkdownToSubstack._parse_inline(item)
+                        list_items.append({
+                            "type": "listItem",
+                            "content": [{
+                                "type": "paragraph",
+                                "content": inline if inline else [{"type": "text", "text": item}]
+                            }]
+                        })
+                    doc.content.append({
+                        "type": "bulletList",
+                        "content": list_items
+                    })
                 continue
 
             # Numbered lists
@@ -434,7 +463,22 @@ class MarkdownToSubstack:
                     else:
                         break
                 if items:
-                    doc.numbered_list(items)
+                    list_items = []
+                    for item in items:
+                        # Parse inline formatting inside each list item
+                        inline = MarkdownToSubstack._parse_inline(item)
+                        list_items.append({
+                            "type": "listItem",
+                            "content": [{
+                                "type": "paragraph",
+                                "content": inline if inline else [{"type": "text", "text": item}]
+                            }]
+                        })
+                    doc.content.append({
+                        "type": "orderedList",
+                        "attrs": {"order": 1},
+                        "content": list_items
+                    })
                 continue
 
             # Regular paragraph - parse inline formatting
