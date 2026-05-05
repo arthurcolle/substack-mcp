@@ -701,10 +701,7 @@ class SubstackClient:
     def test_connection(self) -> bool:
         """Test if connected with valid credentials"""
         try:
-            self._put(self.sub_base, "/user-setting", {
-                "type": "last_home_tab",
-                "value_text": "inbox"
-            })
+            self._get(self.sub_base, "/handle/options")
             return True
         except:
             return False
@@ -713,11 +710,7 @@ class SubstackClient:
         """Get authenticated user's ID"""
         if self._user_id:
             return self._user_id
-        r = self._put(self.sub_base, "/user-setting", {
-            "type": "last_home_tab",
-            "value_text": "inbox"
-        })
-        self._user_id = r.get("user_id")
+        self._user_id = self.get_profile().id
         return self._user_id
 
     def get_handle(self) -> str:
