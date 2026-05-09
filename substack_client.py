@@ -699,25 +699,37 @@ class SubstackClient:
     # --- Authentication & Profile ---
 
     def test_connection(self) -> bool:
-        """Test if connected with valid credentials"""
+        """Test if connected with valid credentials.
+
+        Uses GET /handle/options (read-only, side-effect free). The previous
+        implementation issued PUT /user-setting which started returning 400
+        Bad Request on Substack's side, breaking initialization for all callers.
+        """
         try:
-            self._put(self.sub_base, "/user-setting", {
-                "type": "last_home_tab",
-                "value_text": "inbox"
-            })
-            return True
-        except:
+            r = self._get(self.sub_base, "/handle/options")
+            return isinstance(r, dict) and len(r.get("potentialHandles", [])) > 0
+        except Exception:
             return False
 
     def get_user_id(self) -> int:
-        """Get authenticated user's ID"""
+        """Get authenticated user's ID.
+
+        Resolves user_id via the public profile endpoint:
+            handle = GET /handle/options -> potentialHandles[type=existing].handle
+            user   = GET /user/{handle}/public_profile -> id
+        Both endpoints are read-only and currently 200-stable as of 2026-05.
+        Replaces the previous PUT /user-setting hack that began returning 400.
+        """
         if self._user_id:
             return self._user_id
-        r = self._put(self.sub_base, "/user-setting", {
-            "type": "last_home_tab",
-            "value_text": "inbox"
-        })
-        self._user_id = r.get("user_id")
+        handle = self.get_handle()
+        r = self._get(self.sub_base, f"/user/{handle}/public_profile")
+        user_id = r.get("id")
+        if not isinstance(user_id, int):
+            raise ValueError(
+                f"Could not resolve user_id from public_profile for handle={handle!r}"
+            )
+        self._user_id = user_id
         return self._user_id
 
     def get_handle(self) -> str:
@@ -833,8 +845,17 @@ class SubstackClient:
     def get_drafts(self) -> List[SubstackDraft]:
         """Get all drafts"""
         r = self._get(self.pub_base, "/drafts")
+        # 2026-05: /api/v1/drafts now returns
+        #   {"posts": [...], "hasMore": ..., "nextCursor": ...}
+        # instead of a bare list. Accept both shapes for forward/backward compat.
+        if isinstance(r, dict):
+            items = r.get("posts", [])
+        elif isinstance(r, list):
+            items = r
+        else:
+            items = []
         drafts = []
-        for d in r:
+        for d in items:
             drafts.append(SubstackDraft(
                 id=d["id"],
                 title=d.get("draft_title", ""),
