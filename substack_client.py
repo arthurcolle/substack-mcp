@@ -699,25 +699,34 @@ class SubstackClient:
     # --- Authentication & Profile ---
 
     def test_connection(self) -> bool:
-        """Test if connected with valid credentials"""
+        """Test if connected with valid credentials.
+
+        Patched 2026-05-13: original used PUT /user-setting with type=last_home_tab,
+        which Substack now rejects with 400 'Invalid value'. Replaced with a
+        lightweight GET against /handle/options which validates the session cookie
+        without needing a server-accepted body shape.
+        """
         try:
-            self._put(self.sub_base, "/user-setting", {
-                "type": "last_home_tab",
-                "value_text": "inbox"
-            })
+            self._get(self.sub_base, "/handle/options")
             return True
-        except:
+        except Exception as e:
+            import sys
+            print(f"test_connection failed: {e!r}", file=sys.stderr)
             return False
 
     def get_user_id(self) -> int:
-        """Get authenticated user's ID"""
+        """Get authenticated user's ID.
+
+        Patched 2026-05-13: original used PUT /user-setting with
+        type=last_home_tab to retrieve user_id from the response. Substack
+        now rejects that body shape with 400 'Invalid value'. Replaced with
+        the existing handle → public_profile flow, which uses two endpoints
+        that are known to work and returns the user_id as `profile.id`.
+        """
         if self._user_id:
             return self._user_id
-        r = self._put(self.sub_base, "/user-setting", {
-            "type": "last_home_tab",
-            "value_text": "inbox"
-        })
-        self._user_id = r.get("user_id")
+        profile = self.get_profile()
+        self._user_id = profile.id
         return self._user_id
 
     def get_handle(self) -> str:
@@ -831,10 +840,16 @@ class SubstackClient:
     # --- Drafts ---
 
     def get_drafts(self) -> List[SubstackDraft]:
-        """Get all drafts"""
+        """Get all drafts.
+
+        Patched 2026-05-13: the /drafts endpoint now returns a paginated
+        envelope {"posts": [...], "hasMore": bool, "nextCursor": ...}
+        rather than a flat list. Handle both for backward compatibility.
+        """
         r = self._get(self.pub_base, "/drafts")
+        posts = r.get("posts", []) if isinstance(r, dict) else r
         drafts = []
-        for d in r:
+        for d in posts:
             drafts.append(SubstackDraft(
                 id=d["id"],
                 title=d.get("draft_title", ""),
