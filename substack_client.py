@@ -699,14 +699,19 @@ class SubstackClient:
     # --- Authentication & Profile ---
 
     def test_connection(self) -> bool:
-        """Test if connected with valid credentials"""
+        """Test if connected with valid credentials.
+
+        Patched 2026-05-13: original used PUT /user-setting with type=last_home_tab,
+        which Substack now rejects with 400 'Invalid value'. Replaced with a
+        lightweight GET against /handle/options which validates the session cookie
+        without needing a server-accepted body shape.
+        """
         try:
-            self._put(self.sub_base, "/user-setting", {
-                "type": "last_home_tab",
-                "value_text": "inbox"
-            })
+            self._get(self.sub_base, "/handle/options")
             return True
-        except:
+        except Exception as e:
+            import sys
+            print(f"test_connection failed: {e!r}", file=sys.stderr)
             return False
 
     def get_user_id(self) -> int:
