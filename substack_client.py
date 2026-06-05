@@ -837,10 +837,21 @@ class SubstackClient:
     # --- Drafts ---
 
     def get_drafts(self) -> List[SubstackDraft]:
-        """Get all drafts"""
+        """Get all drafts.
+
+        The /drafts endpoint now returns a paginated envelope
+        {"posts": [...], "hasMore": ..., "nextCursor": ...} rather than a bare
+        list. Accept both shapes for forward/backward compatibility. Iterating
+        the dict directly would yield its keys and crash on d["id"] with
+        "TypeError: string indices must be integers".
+        """
         r = self._get(self.pub_base, "/drafts")
+        if isinstance(r, dict):
+            posts = r.get("posts", [])
+        else:
+            posts = r
         drafts = []
-        for d in r:
+        for d in posts:
             drafts.append(SubstackDraft(
                 id=d["id"],
                 title=d.get("draft_title", ""),
