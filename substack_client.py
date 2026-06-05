@@ -699,25 +699,31 @@ class SubstackClient:
     # --- Authentication & Profile ---
 
     def test_connection(self) -> bool:
-        """Test if connected with valid credentials"""
+        """Test if connected with valid credentials.
+
+        Uses GET /handle/options instead of the old PUT /user-setting call,
+        which Substack now rejects with HTTP 400.
+        """
         try:
-            self._put(self.sub_base, "/user-setting", {
-                "type": "last_home_tab",
-                "value_text": "inbox"
-            })
+            self.get_handle()
             return True
-        except:
+        except Exception:
             return False
 
     def get_user_id(self) -> int:
-        """Get authenticated user's ID"""
+        """Get authenticated user's ID.
+
+        Resolves the authenticated handle, then reads the user id from that
+        handle's public_profile. Replaces the old PUT /user-setting call,
+        which Substack now rejects with HTTP 400.
+        """
         if self._user_id:
             return self._user_id
-        r = self._put(self.sub_base, "/user-setting", {
-            "type": "last_home_tab",
-            "value_text": "inbox"
-        })
-        self._user_id = r.get("user_id")
+        handle = self.get_handle()
+        r = self._get(self.sub_base, f"/user/{handle}/public_profile")
+        self._user_id = r.get("id")
+        if not self._user_id:
+            raise ValueError("Could not resolve user_id from public_profile")
         return self._user_id
 
     def get_handle(self) -> str:
@@ -831,10 +837,21 @@ class SubstackClient:
     # --- Drafts ---
 
     def get_drafts(self) -> List[SubstackDraft]:
-        """Get all drafts"""
+        """Get all drafts.
+
+        The /drafts endpoint now returns a paginated envelope
+        {"posts": [...], "hasMore": ..., "nextCursor": ...} rather than a bare
+        list. Accept both shapes for forward/backward compatibility. Iterating
+        the dict directly would yield its keys and crash on d["id"] with
+        "TypeError: string indices must be integers".
+        """
         r = self._get(self.pub_base, "/drafts")
+        if isinstance(r, dict):
+            posts = r.get("posts", [])
+        else:
+            posts = r
         drafts = []
-        for d in r:
+        for d in posts:
             drafts.append(SubstackDraft(
                 id=d["id"],
                 title=d.get("draft_title", ""),
